@@ -10,6 +10,8 @@ from typing import List
 import os
 import shutil
 import uuid
+import json
+import pathlib
 
 from .database import engine, get_session
 from .models import User, OtpCode, Course, Enrollment, ClassSession, Announcement, Note
@@ -42,16 +44,7 @@ ALGORITHM = "HS256"
 
 app = FastAPI(title="Teaching App Backend (Auth)")
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-]
-
 # ---- CORS ----
-# ---- CORS (temporary debug: allow everything) ----
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],   # <-- temporary: allow all origins so browser won't block
@@ -63,7 +56,6 @@ app.add_middleware(
 
 # ---- Startup: create DB tables ----
 # Mount static files for serving uploaded files
-import pathlib
 STATIC_DIR = pathlib.Path(__file__).parent.parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -72,25 +64,29 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 def on_startup():
     SQLModel.metadata.create_all(engine)
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme), session=Depends(get_session)) -> User:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = get_user_by_email(session, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
 # ---- Auth endpoints ----
 @app.post("/api/auth/register", response_model=UserOut)
 def register(user_in: UserCreate, session=Depends(get_session)):
-    # DEBUG: inspect incoming password (temporary)
-    try:
-        pw = user_in.password
-        # safe repr to avoid printing secrets in logs for long term — this is temporary
-        print("DEBUG: password type:", type(pw), "repr:", repr(pw)[:200])
-        if isinstance(pw, str):
-            print("DEBUG: password length (bytes):", len(pw.encode("utf-8")))
-        else:
-            print("DEBUG: password is not a string")
-    except Exception as e:
-        print("DEBUG: error inspecting password:", e)
-
     existing = get_user_by_email(session, user_in.email)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    # proceed to hashing (or fail early if password looks wrong)
     try:
         hashed = hash_password(user_in.password)
     except Exception as e:
@@ -109,8 +105,6 @@ def login(credentials: UserCreate, session=Depends(get_session)):
     token = create_access_token(subject=user.email, data={"role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
 @app.post("/api/auth/forgot-password")
 def forgot_password(payload: ForgotPasswordRequest, session=Depends(get_session)):
     # Generic response to avoid user enumeration
@@ -118,14 +112,13 @@ def forgot_password(payload: ForgotPasswordRequest, session=Depends(get_session)
 
     user = get_user_by_email(session, payload.email)
     if not user:
-        # Don't reveal that the user doesn't exist
         return generic_response
 
     # Generate OTP
     code = generate_otp_code()
     expires_at = datetime.utcnow() + timedelta(minutes=10)
 
-    # Invalidate previous unused codes (optional safety)
+    # Invalidate previous unused codes
     stmt = select(OtpCode).where(OtpCode.user_id == user.id, OtpCode.used == False)
     for existing in session.exec(stmt):
         existing.used = True
@@ -142,10 +135,9 @@ def forgot_password(payload: ForgotPasswordRequest, session=Depends(get_session)
     # SEND EMAIL
     send_otp_email(user.email, code)
 
-    # Dev: still log it so you can see in console
+    # Dev: log OTP
     print(f"[DEV] OTP for {user.email}: {code} (valid until {expires_at})")
 
-    # Dev: keep dev_otp in response until you're confident; remove later in prod
     return {
         **generic_response,
         "dev_otp": code,
@@ -186,40 +178,16 @@ def otp_login(payload: OtpLoginRequest, session=Depends(get_session)):
     session.add(otp)
     session.commit()
 
-    # Issue a normal access token (same as password login)
+    # Issue a normal access token
     token = create_access_token(subject=user.email, data={"role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
 @app.get("/api/me", response_model=UserOut)
-def me(token: str = Depends(oauth2_scheme), session=Depends(get_session)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user = get_user_by_email(session, email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+def me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-def get_current_user(token: str = Depends(oauth2_scheme), session=Depends(get_session)) -> User:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = get_user_by_email(session, email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+# ---- Course Endpoints ----
 
 @app.post("/api/courses", response_model=CourseOut)
 def create_course(
@@ -287,11 +255,7 @@ def my_courses(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns courses based on user role:
-    - Teachers: courses they created
-    - Students: courses they are enrolled in
-    
-    Each course includes sessions and enrollment count.
+    Returns courses based on user role.
     """
     if current_user.role == "teacher":
         # Teachers see courses they created
@@ -354,35 +318,49 @@ def my_courses(
     return result
 
 
-@app.get("/api/courses/{course_id}/sessions")
-def get_course_sessions(
+@app.get("/api/courses/{course_id}/sessions", response_model=List[ClassSessionOut])
+def list_course_sessions(
     course_id: int,
-    session=Depends(get_session),
+    db_session=Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Get all sessions for a course"""
-    course = session.get(Course, course_id)
+    """List all sessions for a course"""
+    course = db_session.get(Course, course_id)
     if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(404, "Course not found")
     
-    sessions_list = session.exec(
+    # Verify access
+    if current_user.role == "teacher":
+        if course.teacher_id != current_user.id:
+            raise HTTPException(403, "Not your course")
+    elif current_user.role == "student":
+        enrollment = db_session.exec(
+            select(Enrollment).where(
+                Enrollment.user_id == current_user.id,
+                Enrollment.course_id == course_id
+            )
+        ).first()
+        if not enrollment:
+            raise HTTPException(403, "Not enrolled")
+
+    sessions = db_session.exec(
         select(ClassSession).where(ClassSession.course_id == course_id)
         .order_by(ClassSession.start_time.desc())
     ).all()
     
+    # Manually construct ClassSessionOut to include course_title
     result = []
-    for cs in sessions_list:
-        result.append({
-            "id": cs.id,
-            "course_id": cs.course_id,
-            "title": cs.title,
-            "start_time": cs.start_time.isoformat() if cs.start_time else None,
-            "end_time": cs.end_time.isoformat() if cs.end_time else None,
-            "meeting_url": cs.meeting_url or "",
-            "status": cs.status,
-            "course_title": course.title
-        })
-    
+    for s in sessions:
+        result.append(ClassSessionOut(
+            id=s.id,
+            course_id=s.course_id,
+            title=s.title,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            meeting_url=s.meeting_url,
+            status=s.status,
+            course_title=course.title
+        ))
     return result
 
 
@@ -393,153 +371,191 @@ def create_class_session(
     session=Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
+    """Create a live class session (teacher only)"""
     course = session.get(Course, course_id)
     if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-
+        raise HTTPException(404, "Course not found")
     if course.teacher_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the course teacher can create sessions")
+        raise HTTPException(403, "Only the course teacher can create sessions")
 
-    end_time = data.start_time + timedelta(minutes=data.duration_minutes)
+    # Generate unique room name
+    room_name = f"course{course_id}_sess{uuid.uuid4().hex[:8]}"
+    # Placeholder meeting URL (will integrate LiveKit in Phase 2)
+    meeting_url = f"https://meet.placeholder/{room_name}"
 
-    cs = ClassSession(
-        course_id=course.id,
+    class_session = ClassSession(
+        course_id=course_id,
+        teacher_id=current_user.id,
         title=data.title,
         start_time=data.start_time,
-        end_time=end_time,
-        meeting_url=data.meeting_url,
         status="scheduled",
+        meeting_url=meeting_url,
+        room_name=room_name,
+        participants="[]"
     )
-    session.add(cs)
+    session.add(class_session)
     session.commit()
-    session.refresh(cs)
+    session.refresh(class_session)
 
     return ClassSessionOut(
-        id=cs.id,
-        course_id=cs.course_id,
-        title=cs.title,
-        start_time=cs.start_time,
-        end_time=cs.end_time,
-        meeting_url=cs.meeting_url,
-        status=cs.status,
-        course_title=course.title,
+        id=class_session.id,
+        course_id=class_session.course_id,
+        title=class_session.title,
+        start_time=class_session.start_time,
+        end_time=class_session.end_time,
+        meeting_url=class_session.meeting_url,
+        status=class_session.status,
+        course_title=course.title
     )
 
 
 @app.post("/api/sessions/{session_id}/join")
 def join_session(
     session_id: int,
-    session=Depends(get_session),
+    db_session=Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Join a session and get a LiveKit token for the classroom."""
-    cs = session.get(ClassSession, session_id)
-    if not cs:
-        raise HTTPException(status_code=404, detail="Session not found")
+    """Join a class session (teacher/student)"""
+    class_session = db_session.get(ClassSession, session_id)
+    if not class_session:
+        raise HTTPException(404, "Session not found")
 
-    course = session.get(Course, cs.course_id)
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
+    # Check if user is teacher or enrolled student
+    course = db_session.get(Course, class_session.course_id)
+    if current_user.role == "teacher":
+        if course.teacher_id != current_user.id:
+            raise HTTPException(403, "Not your course")
 
-    # Check authorization - teacher or enrolled student
-    is_teacher = course.teacher_id == current_user.id
-    is_enrolled = session.exec(
-        select(Enrollment).where(
-            Enrollment.user_id == current_user.id,
-            Enrollment.course_id == course.id
-        )
-    ).first() is not None
+        # Teacher auto-starts the session
+        if class_session.status == "scheduled":
+            class_session.status = "live"
+            # If room name wasn't set (from legacy code), set it now
+            if not class_session.room_name:
+                class_session.room_name = f"session-{session_id}"
+            db_session.add(class_session)
+            db_session.commit()
+            db_session.refresh(class_session)
 
-    if not is_teacher and not is_enrolled:
-        raise HTTPException(status_code=403, detail="Not authorized to join this session")
+    elif current_user.role == "student":
+        enrollment = db_session.exec(
+            select(Enrollment).where(
+                Enrollment.user_id == current_user.id,
+                Enrollment.course_id == class_session.course_id
+            )
+        ).first()
+        if not enrollment:
+            raise HTTPException(403, "Not enrolled in this course")
+    else:
+        raise HTTPException(403, "Invalid role")
 
-    # Set session to live if teacher is starting it
-    if is_teacher and cs.status == "scheduled":
-        cs.status = "live"
-        cs.room_name = f"session-{session_id}"
-        session.add(cs)
-        session.commit()
-        session.refresh(cs)
+    # Add user to participants if not already there
+    participants = json.loads(class_session.participants)
+    if current_user.id not in participants:
+        participants.append(current_user.id)
+        class_session.participants = json.dumps(participants)
+        db_session.add(class_session)
+        db_session.commit()
 
-    # Generate LiveKit token
-    room_name = cs.room_name or f"session-{session_id}"
-    participant_identity = f"user-{current_user.id}"
-    participant_name = current_user.full_name or current_user.email
+    # Create class-specific token
+    token_data = {
+        "sub": str(current_user.id),
+        "role": current_user.role,
+        "class_id": class_session.course_id,
+        "session_id": session_id,
+        "exp": datetime.utcnow() + timedelta(hours=2)
+    }
+    class_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
 
-    livekit_token = create_livekit_token(room_name, participant_identity, participant_name)
+    # Generate LiveKit Token
+    room_name = class_session.room_name or f"session-{session_id}"
+    livekit_token = create_livekit_token(
+        room_name=room_name,
+        participant_identity=str(current_user.id),
+        participant_name=current_user.full_name or f"User {current_user.id}"
+    )
 
     return {
+        "class_token": class_token,
         "livekit_token": livekit_token,
-        "session": {
-            "id": cs.id,
-            "title": cs.title,
-            "status": cs.status,
-            "room_name": room_name,
-            "course_title": course.title
-        }
+        "meeting_url": class_session.meeting_url,
+        "session": class_session # This returns ORM object. Might miss course_title if schema expects it nested in session?
+        # Actually join_session returns a dict, not ClassSessionOut response model.
+        # But "session" key in the dict needs to be serialized.
+        # If frontend expects course_title inside session object, we might need to add it.
+        # Fastapi will serialize the ORM object. If we want course_title, we need to convert it or ensure frontend doesn't need it or model has it.
     }
-
-
-@app.post("/api/sessions/{session_id}/start", response_model=ClassSessionOut)
-def start_session(
-    session_id: int,
-    session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    cs = session.get(ClassSession, session_id)
-    if not cs:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    course = session.get(Course, cs.course_id)
-    if course.teacher_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your course")
-
-    cs.status = "live"
-    session.add(cs)
-    session.commit()
-    session.refresh(cs)
-
-    return ClassSessionOut(
-        id=cs.id,
-        course_id=cs.course_id,
-        title=cs.title,
-        start_time=cs.start_time,
-        end_time=cs.end_time,
-        meeting_url=cs.meeting_url,
-        status=cs.status,
-        course_title=course.title,
-    )
 
 
 @app.post("/api/sessions/{session_id}/end", response_model=ClassSessionOut)
 def end_session(
     session_id: int,
-    session=Depends(get_session),
+    db_session=Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    cs = session.get(ClassSession, session_id)
-    if not cs:
-        raise HTTPException(status_code=404, detail="Session not found")
+    """End a class session (teacher only)"""
+    class_session = db_session.get(ClassSession, session_id)
+    if not class_session:
+        raise HTTPException(404, "Session not found")
+    if class_session.teacher_id != current_user.id:
+        raise HTTPException(403, "Only the teacher can end the session")
 
-    course = session.get(Course, cs.course_id)
-    if course.teacher_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your course")
+    course = db_session.get(Course, class_session.course_id)
 
-    cs.status = "ended"
-    session.add(cs)
-    session.commit()
-    session.refresh(cs)
+    class_session.status = "ended"
+    class_session.end_time = datetime.utcnow()
+    db_session.add(class_session)
+    db_session.commit()
+    db_session.refresh(class_session)
 
     return ClassSessionOut(
-        id=cs.id,
-        course_id=cs.course_id,
-        title=cs.title,
-        start_time=cs.start_time,
-        end_time=cs.end_time,
-        meeting_url=cs.meeting_url,
-        status=cs.status,
-        course_title=course.title,
+        id=class_session.id,
+        course_id=class_session.course_id,
+        title=class_session.title,
+        start_time=class_session.start_time,
+        end_time=class_session.end_time,
+        meeting_url=class_session.meeting_url,
+        status=class_session.status,
+        course_title=course.title
     )
+
+
+@app.get("/api/sessions/{session_id}", response_model=ClassSessionOut)
+def get_class_session(
+    session_id: int,
+    db_session=Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get session details"""
+    class_session = db_session.get(ClassSession, session_id)
+    if not class_session:
+        raise HTTPException(404, "Session not found")
+
+    # Verify access
+    course = db_session.get(Course, class_session.course_id)
+    if current_user.role == "teacher":
+        if course.teacher_id != current_user.id:
+            raise HTTPException(403, "Not authorized")
+    elif current_user.role == "student":
+        enrollment = db_session.exec(
+            select(Enrollment).where(
+                Enrollment.user_id == current_user.id,
+                Enrollment.course_id == class_session.course_id
+            )
+        ).first()
+        if not enrollment:
+            raise HTTPException(403, "Not enrolled")
+
+    return ClassSessionOut(
+        id=class_session.id,
+        course_id=class_session.course_id,
+        title=class_session.title,
+        start_time=class_session.start_time,
+        end_time=class_session.end_time,
+        meeting_url=class_session.meeting_url,
+        status=class_session.status,
+        course_title=course.title
+    )
+
 
 @app.get("/api/my/sessions", response_model=List[ClassSessionOut])
 def my_sessions(
@@ -687,16 +703,6 @@ def create_note(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        # The URL should be accessible from the frontend.
-        # Since we mounted /static, the URL is /static/filename
-        # We need the full URL or relative. Frontend will likely prepend API_URL if it's relative?
-        # Actually standard practice is usually a relative path or absolute URL.
-        # Since this is a simple app, let's just return /static/filename and assume frontend knows where the server is.
-        # But wait, frontend runs on 5173, backend on 8000.
-        # So it should probably be http://localhost:8000/static/filename
-        # Or I can just return /static/filename and frontend uses "API_URL + /static/..." ?
-        # Or better yet, just return the path relative to the server root.
-        
         file_url = f"/static/{filename}"
         file_type = file.content_type
 
@@ -730,183 +736,3 @@ def delete_note(
     session.delete(note)
     session.commit()
     return {"message": "Deleted"}
-
-
-# ---- Class Session endpoints ----
-import json
-
-@app.post("/api/courses/{course_id}/sessions", response_model=ClassSessionOut)
-def create_class_session(
-    course_id: int,
-    data: ClassSessionCreate,
-    session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """Create a live class session (teacher only)"""
-    course = session.get(Course, course_id)
-    if not course:
-        raise HTTPException(404, "Course not found")
-    if course.teacher_id != current_user.id:
-        raise HTTPException(403, "Only the course teacher can create sessions")
-    
-    # Generate unique room name
-    room_name = f"course{course_id}_sess{uuid.uuid4().hex[:8]}"
-    # Placeholder meeting URL (will integrate LiveKit in Phase 2)
-    meeting_url = f"https://meet.placeholder/{room_name}"
-    
-    class_session = ClassSession(
-        course_id=course_id,
-        teacher_id=current_user.id,
-        title=data.title,
-        start_time=data.start_time,
-        status="scheduled",
-        meeting_url=meeting_url,
-        room_name=room_name,
-        participants="[]"
-    )
-    session.add(class_session)
-    session.commit()
-    session.refresh(class_session)
-    return class_session
-
-
-@app.post("/api/sessions/{session_id}/join")
-def join_class_session(
-    session_id: int,
-    db_session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """Join a class session (teacher/student)"""
-    class_session = db_session.get(ClassSession, session_id)
-    if not class_session:
-        raise HTTPException(404, "Session not found")
-    
-    # Check if user is teacher or enrolled student
-    course = db_session.get(Course, class_session.course_id)
-    if current_user.role == "teacher":
-        if course.teacher_id != current_user.id:
-            raise HTTPException(403, "Not your course")
-    elif current_user.role == "student":
-        enrollment = db_session.exec(
-            select(Enrollment).where(
-                Enrollment.student_id == current_user.id,
-                Enrollment.course_id == class_session.course_id
-            )
-        ).first()
-        if not enrollment:
-            raise HTTPException(403, "Not enrolled in this course")
-    else:
-        raise HTTPException(403, "Invalid role")
-    
-    # Add user to participants if not already there
-    participants = json.loads(class_session.participants)
-    if current_user.id not in participants:
-        participants.append(current_user.id)
-        class_session.participants = json.dumps(participants)
-        db_session.add(class_session)
-        db_session.commit()
-    
-    # Create class-specific token
-    token_data = {
-        "sub": str(current_user.id),
-        "role": current_user.role,
-        "class_id": class_session.course_id,
-        "session_id": session_id,
-        "exp": datetime.utcnow() + timedelta(hours=2)
-    }
-    class_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
-    
-    # Generate LiveKit Token
-    livekit_token = create_livekit_token(
-        room_name=class_session.room_name,
-        participant_identity=str(current_user.id),
-        participant_name=current_user.full_name or f"User {current_user.id}"
-    )
-
-    return {
-        "class_token": class_token,
-        "livekit_token": livekit_token,
-        "meeting_url": class_session.meeting_url,
-        "session": class_session
-    }
-
-
-@app.post("/api/sessions/{session_id}/end", response_model=ClassSessionOut)
-def end_class_session(
-    session_id: int,
-    db_session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """End a class session (teacher only)"""
-    class_session = db_session.get(ClassSession, session_id)
-    if not class_session:
-        raise HTTPException(404, "Session not found")
-    if class_session.teacher_id != current_user.id:
-        raise HTTPException(403, "Only the teacher can end the session")
-    
-    class_session.status = "ended"
-    class_session.end_time = datetime.utcnow()
-    db_session.add(class_session)
-    db_session.commit()
-    db_session.refresh(class_session)
-    return class_session
-
-
-@app.get("/api/sessions/{session_id}", response_model=ClassSessionOut)
-def get_class_session(
-    session_id: int,
-    db_session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """Get session details"""
-    class_session = db_session.get(ClassSession, session_id)
-    if not class_session:
-        raise HTTPException(404, "Session not found")
-    
-    # Verify access
-    course = db_session.get(Course, class_session.course_id)
-    if current_user.role == "teacher":
-        if course.teacher_id != current_user.id:
-            raise HTTPException(403, "Not authorized")
-    elif current_user.role == "student":
-        enrollment = db_session.exec(
-            select(Enrollment).where(
-                Enrollment.student_id == current_user.id,
-                Enrollment.course_id == class_session.course_id
-            )
-        ).first()
-        if not enrollment:
-            raise HTTPException(403, "Not enrolled")
-    
-    return class_session
-
-
-@app.get("/api/courses/{course_id}/sessions", response_model=List[ClassSessionOut])
-def list_course_sessions(
-    course_id: int,
-    db_session=Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """List all sessions for a course"""
-    course = db_session.get(Course, course_id)
-    if not course:
-        raise HTTPException(404, "Course not found")
-    
-    # Verify access
-    if current_user.role == "teacher":
-        if course.teacher_id != current_user.id:
-            raise HTTPException(403, "Not your course")
-    elif current_user.role == "student":
-        enrollment = db_session.exec(
-            select(Enrollment).where(
-                Enrollment.student_id == current_user.id,
-                Enrollment.course_id == course_id
-            )
-        ).first()
-        if not enrollment:
-            raise HTTPException(403, "Not enrolled")
-    
-    sessions = db_session.exec(
-        select(ClassSession).where(ClassSession.course_id == course_id)
-    ).all()
-    return sessions

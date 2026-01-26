@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, constr
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 class UserCreate(BaseModel):
@@ -18,8 +18,6 @@ class UserOut(BaseModel):
     full_name: Optional[str] = None
     role: str
 
-# your existing UserCreate, Token, UserOut are here...
-
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -27,26 +25,9 @@ class OtpLoginRequest(BaseModel):
     email: EmailStr
     code: constr(min_length=4, max_length=4)
 
-
-# ... your existing UserCreate, Token, UserOut, ForgotPasswordRequest, OtpLoginRequest ...
-
 class CourseCreate(BaseModel):
     title: str
     description: str = ""
-
-
-class CourseOut(BaseModel):
-    id: int
-    title: str
-    description: str
-    teacher_id: int
-    teacher_name: Optional[str] = None
-    sessions: list = []  # list of ClassSessionOut
-    enrollment_count: int = 0
-
-    class Config:
-        orm_mode = True
-
 
 class ClassSessionCreate(BaseModel):
     title: str
@@ -54,25 +35,33 @@ class ClassSessionCreate(BaseModel):
     duration_minutes: int = 60
     meeting_url: str = ""  # Optional - can be added later or auto-generated
 
-
 class ClassSessionOut(BaseModel):
     id: int
     course_id: int
     title: str
     start_time: datetime
-    end_time: datetime | None
-    meeting_url: str
+    end_time: Optional[datetime]
+    meeting_url: Optional[str]
     status: str
     course_title: str
 
     class Config:
         orm_mode = True
 
+class CourseOut(BaseModel):
+    id: int
+    title: str
+    description: str
+    teacher_id: int
+    teacher_name: Optional[str] = None
+    sessions: List[ClassSessionOut] = []
+    enrollment_count: int = 0
 
-# Announcement schemas
+    class Config:
+        orm_mode = True
+
 class AnnouncementCreate(BaseModel):
     content: str
-
 
 class AnnouncementOut(BaseModel):
     id: int
@@ -83,12 +72,9 @@ class AnnouncementOut(BaseModel):
     class Config:
         orm_mode = True
 
-
-# Note schemas
 class NoteCreate(BaseModel):
     title: str
     content: str = ""
-
 
 class NoteOut(BaseModel):
     id: int
@@ -101,7 +87,6 @@ class NoteOut(BaseModel):
 
     class Config:
         orm_mode = True
-
 
 class ClassTokenPayload(BaseModel):
     """Payload for class-specific JWT tokens"""

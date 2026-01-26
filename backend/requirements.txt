@@ -5,3 +5,8 @@ psycopg2-binary==2.9.7
 python-dotenv==1.0.1
 passlib[bcrypt]==1.7.4
 python-jose==3.3.0
+livekit-api
+requests
+email-validator
+python-multipart
+argon2-cffi
