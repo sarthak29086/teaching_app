@@ -1,6 +1,6 @@
 from typing import Optional
-from sqlmodel import SQLModel, Field
 from datetime import datetime
+from sqlmodel import SQLModel, Field
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -10,8 +10,6 @@ class User(SQLModel, table=True):
     role: str = Field(default="student")  # 'student' or 'teacher'
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-# existing User model is already here...
-
 class OtpCode(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int  # we just store the user id; no need for foreign key right now
@@ -20,12 +18,6 @@ class OtpCode(SQLModel, table=True):
     expires_at: datetime
     used: bool = Field(default=False)
 
-from datetime import datetime
-from typing import Optional
-from sqlmodel import SQLModel, Field
-
-# ... your existing User and OtpCode models ...
-
 class Course(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
@@ -33,13 +25,11 @@ class Course(SQLModel, table=True):
     teacher_id: int
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-
 class Enrollment(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int
     course_id: int
     created_at: datetime = Field(default_factory=datetime.utcnow)
-
 
 class Announcement(SQLModel, table=True):
     """Course announcements posted by teachers"""
@@ -48,7 +38,6 @@ class Announcement(SQLModel, table=True):
     teacher_id: int
     content: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
-
 
 class Note(SQLModel, table=True):
     """Course notes/materials posted by teachers"""
@@ -60,7 +49,6 @@ class Note(SQLModel, table=True):
     file_url: Optional[str] = None
     file_type: Optional[str] = None  # 'pdf', 'ppt', etc.
     created_at: datetime = Field(default_factory=datetime.utcnow)
-
 
 class ClassSession(SQLModel, table=True):
     """Live classroom sessions"""
