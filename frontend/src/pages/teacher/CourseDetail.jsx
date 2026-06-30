@@ -24,6 +24,7 @@ export default function CourseDetail() {
   const [sessions, setSessions] = useState([]);
   const [announcements, setAnnouncements] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -41,6 +42,18 @@ export default function CourseDetail() {
   const [noteFile, setNoteFile] = useState(null);
   const [addingNote, setAddingNote] = useState(false);
 
+  // Assignments states
+  const [assignTitle, setAssignTitle] = useState("");
+  const [assignDesc, setAssignDesc] = useState("");
+  const [assignDueDate, setAssignDueDate] = useState("");
+  const [assignFile, setAssignFile] = useState(null);
+  const [creatingAssignment, setCreatingAssignment] = useState(false);
+  const [showCreateAssignment, setShowCreateAssignment] = useState(false);
+
+  const [selectedAssignment, setSelectedAssignment] = useState(null);
+  const [submissions, setSubmissions] = useState([]);
+  const [loadingSubmissions, setLoadingSubmissions] = useState(false);
+
   // Fetch all data on mount
   useEffect(() => {
     const fetchData = async () => {
@@ -55,17 +68,19 @@ export default function CourseDetail() {
         if (foundCourse) {
           setCourse(foundCourse);
 
-          // Fetch sessions, announcements and notes from API
-          const [sessionsData, announcementsData, notesData] =
+          // Fetch sessions, announcements, notes and assignments from API
+          const [sessionsData, announcementsData, notesData, assignmentsData] =
             await Promise.all([
               api.get(`/api/courses/${courseId}/sessions`, { token }),
               api.get(`/api/courses/${courseId}/announcements`, { token }),
               api.get(`/api/courses/${courseId}/notes`, { token }),
+              api.get(`/api/courses/${courseId}/assignments`, { token }),
             ]);
 
           setSessions(sessionsData || []);
           setAnnouncements(announcementsData || []);
           setNotes(notesData || []);
+          setAssignments(assignmentsData || []);
         } else {
           setError("Course not found");
         }
@@ -211,6 +226,75 @@ export default function CourseDetail() {
     }
   };
 
+  const handleSelectAssignment = async (asm) => {
+    setSelectedAssignment(asm);
+    setLoadingSubmissions(true);
+    try {
+      const subs = await api.get(`/api/assignments/${asm.id}/submissions`, { token });
+      setSubmissions(subs || []);
+    } catch (err) {
+      alert(err.detail || "Failed to load submissions");
+    } finally {
+      setLoadingSubmissions(false);
+    }
+  };
+
+  const handleCreateAssignment = async (e) => {
+    e.preventDefault();
+    if (!assignTitle.trim() || !assignDueDate) return;
+
+    setCreatingAssignment(true);
+    try {
+      const formData = new FormData();
+      formData.append("title", assignTitle.trim());
+      formData.append("description", assignDesc.trim());
+      formData.append("due_date", assignDueDate);
+      if (assignFile) {
+        formData.append("file", assignFile);
+      }
+
+      const newAsm = await api.post(
+        `/api/courses/${courseId}/assignments`,
+        formData,
+        { token }
+      );
+      setAssignments((prev) => [newAsm, ...prev]);
+      setAssignTitle("");
+      setAssignDesc("");
+      setAssignDueDate("");
+      setAssignFile(null);
+      setShowCreateAssignment(false);
+    } catch (err) {
+      alert(err.detail || "Failed to create assignment");
+    } finally {
+      setCreatingAssignment(false);
+    }
+  };
+
+  const handleGradeSubmission = async (submissionId, marks, feedback) => {
+    if (isNaN(parseFloat(marks))) {
+      alert("Please enter a valid number for marks");
+      return;
+    }
+    try {
+      const updatedSub = await api.post(
+        `/api/submissions/${submissionId}/grade`,
+        { marks: parseFloat(marks), feedback },
+        { token }
+      );
+      setSubmissions((prev) =>
+        prev.map((s) =>
+          s.submission && s.submission.id === submissionId
+            ? { ...s, submission: { ...s.submission, marks: updatedSub.marks, feedback: updatedSub.feedback } }
+            : s
+        )
+      );
+      alert("Grade updated successfully!");
+    } catch (err) {
+      alert(err.detail || "Failed to submit grade");
+    }
+  };
+
   const tabs = [
     {
       id: "sessions",
@@ -230,7 +314,12 @@ export default function CourseDetail() {
       icon: "📝",
       count: notes.length,
     },
-    { id: "assignments", label: "Assignments", icon: "📋", count: 0 },
+    {
+      id: "assignments",
+      label: "Assignments",
+      icon: "📋",
+      count: assignments.length,
+    },
   ];
 
   if (loading) {
@@ -649,20 +738,366 @@ export default function CourseDetail() {
           {/* ASSIGNMENTS TAB */}
           {activeTab === "assignments" && (
             <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">Assignments</h2>
-              <div className="text-center py-16 border border-dashed border-slate-800 rounded-xl">
-                <span className="text-4xl mb-4 block">📋</span>
-                <p className="text-slate-400 mb-2">
-                  Assignments feature coming soon!
-                </p>
-                <p className="text-xs text-slate-500">
-                  Create and grade student assignments
-                </p>
-              </div>
+              {selectedAssignment ? (
+                // SUBMISSIONS VIEW
+                <div className="space-y-6">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => setSelectedAssignment(null)}
+                        className="px-3 py-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white text-sm"
+                      >
+                        ← Back to Assignments
+                      </button>
+                      <div>
+                        <h2 className="text-lg font-bold text-white">
+                          Submissions: {selectedAssignment.title}
+                        </h2>
+                        <p className="text-xs text-slate-400">
+                          Due: {new Date(selectedAssignment.due_date).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-slate-950/40 border border-slate-800">
+                    <p className="text-sm text-slate-300">{selectedAssignment.description || "No description provided."}</p>
+                    {selectedAssignment.file_url && (
+                      <div className="mt-3">
+                        <a
+                          href={`${API_BASE}${selectedAssignment.file_url}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 text-xs"
+                        >
+                          📎 Reference Attachment ({selectedAssignment.file_name})
+                        </a>
+                      </div>
+                    )}
+                  </div>
+
+                  {loadingSubmissions ? (
+                    <div className="flex justify-center py-12">
+                      <div className="w-8 h-8 border-2 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
+                    </div>
+                  ) : submissions.length === 0 ? (
+                    <div className="text-center py-12 border border-dashed border-slate-800 rounded-xl">
+                      <p className="text-slate-400 text-sm">No students enrolled in this course.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {submissions.map((studentData) => (
+                        <SubmissionRow
+                          key={studentData.student_id}
+                          studentData={studentData}
+                          onGrade={handleGradeSubmission}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                // ASSIGNMENTS LIST VIEW
+                <div className="space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-white">Assignments</h2>
+                    {!showCreateAssignment && (
+                      <button
+                        onClick={() => setShowCreateAssignment(true)}
+                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-medium hover:opacity-90"
+                      >
+                        + New Assignment
+                      </button>
+                    )}
+                  </div>
+
+                  {showCreateAssignment && (
+                    <form
+                      onSubmit={handleCreateAssignment}
+                      className="rounded-xl bg-slate-800/50 border border-slate-700/50 p-5 space-y-4"
+                    >
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                          Assignment Title
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g., Assignment 1: Introduction to Algebra"
+                          className="w-full px-4 py-3 rounded-xl bg-slate-900/50 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-sky-500/50"
+                          value={assignTitle}
+                          onChange={(e) => setAssignTitle(e.target.value)}
+                          required
+                          disabled={creatingAssignment}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                          Description
+                        </label>
+                        <textarea
+                          placeholder="Describe instructions, rubrics, etc..."
+                          className="w-full px-4 py-3 rounded-xl bg-slate-900/50 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-sky-500/50 resize-none"
+                          rows={3}
+                          value={assignDesc}
+                          onChange={(e) => setAssignDesc(e.target.value)}
+                          disabled={creatingAssignment}
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                            Due Date & Time
+                          </label>
+                          <input
+                            type="datetime-local"
+                            className="w-full px-4 py-3 rounded-xl bg-slate-900/50 border border-slate-700 text-white focus:outline-none focus:border-sky-500/50"
+                            value={assignDueDate}
+                            onChange={(e) => setAssignDueDate(e.target.value)}
+                            required
+                            disabled={creatingAssignment}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                            Reference Attachment (optional)
+                          </label>
+                          <input
+                            type="file"
+                            className="w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-sky-500/10 file:text-sky-400 hover:file:bg-sky-500/20"
+                            onChange={(e) => setAssignFile(e.target.files[0])}
+                            disabled={creatingAssignment}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3 justify-end pt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowCreateAssignment(false);
+                            setAssignFile(null);
+                          }}
+                          className="px-4 py-2 text-slate-400 hover:text-white"
+                          disabled={creatingAssignment}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={creatingAssignment}
+                          className="px-6 py-2 rounded-lg bg-emerald-500 text-white font-medium disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {creatingAssignment ? (
+                            <>
+                              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              Creating...
+                            </>
+                          ) : (
+                            "Create"
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {assignments.length === 0 ? (
+                    <div className="text-center py-16 border border-dashed border-slate-800 rounded-xl">
+                      <span className="text-4xl mb-4 block">📋</span>
+                      <p className="text-slate-400">No assignments created yet.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {assignments.map((asm) => {
+                        const isOverdue = new Date(asm.due_date) < new Date();
+                        return (
+                          <div
+                            key={asm.id}
+                            className="rounded-xl border border-slate-800 bg-slate-800/30 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                          >
+                            <div>
+                              <h3 className="font-semibold text-white text-base">{asm.title}</h3>
+                              {asm.description && (
+                                <p className="text-sm text-slate-400 mt-1 line-clamp-2">{asm.description}</p>
+                              )}
+                              <div className="flex flex-wrap items-center gap-3 mt-3">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${isOverdue ? "bg-red-500/10 text-red-400" : "bg-sky-500/10 text-sky-400"}`}>
+                                  Due: {new Date(asm.due_date).toLocaleString()}
+                                </span>
+                                {asm.file_url && (
+                                  <a
+                                    href={`${API_BASE}${asm.file_url}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-sky-400 hover:underline"
+                                  >
+                                    📎 {asm.file_name}
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => handleSelectAssignment(asm)}
+                              className="self-start sm:self-center px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition-colors border border-slate-700"
+                            >
+                              Submissions
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function SubmissionRow({ studentData, onGrade }) {
+  const { student_id, student_name, student_email, submission } = studentData;
+  const [marks, setMarks] = useState(
+    submission?.marks !== undefined && submission?.marks !== null
+      ? submission.marks
+      : ""
+  );
+  const [feedback, setFeedback] = useState(submission?.feedback || "");
+  const [editing, setEditing] = useState(
+    !submission || submission.marks === null
+  );
+
+  useEffect(() => {
+    if (submission) {
+      setMarks(submission.marks !== null ? submission.marks : "");
+      setFeedback(submission.feedback || "");
+      setEditing(submission.marks === null);
+    } else {
+      setMarks("");
+      setFeedback("");
+      setEditing(false);
+    }
+  }, [submission]);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (marks === "") {
+      alert("Please enter marks");
+      return;
+    }
+    onGrade(submission.id, marks, feedback);
+    setEditing(false);
+  };
+
+  return (
+    <div className="p-4 rounded-xl border border-slate-800 bg-slate-900/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-white">{student_name}</span>
+          <span className="text-xs text-slate-500">({student_email})</span>
+        </div>
+
+        {submission ? (
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <a
+              href={`${API_BASE}${submission.file_url}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 text-xs font-medium"
+            >
+              📄 View PDF
+            </a>
+            <span className="text-xs text-slate-400">
+              Submitted: {new Date(submission.submitted_at).toLocaleString()}
+            </span>
+            {submission.lateness ? (
+              <span className="px-2 py-0.5 rounded-full bg-red-500/20 text-[10px] font-semibold text-red-400">
+                {submission.lateness}
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-[10px] font-semibold text-emerald-400">
+                On Time
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="inline-block mt-2 px-2 py-0.5 rounded-full bg-slate-800 text-[10px] font-semibold text-slate-400">
+            No Submission
+          </span>
+        )}
+      </div>
+
+      {submission && (
+        <div className="flex-1 max-w-md w-full">
+          {editing ? (
+            <form
+              onSubmit={handleSubmit}
+              className="flex flex-col sm:flex-row gap-2 items-end sm:items-center w-full"
+            >
+              <div className="w-24">
+                <input
+                  type="number"
+                  placeholder="Marks"
+                  min="0"
+                  max="1000"
+                  step="0.5"
+                  className="w-full px-3 py-1.5 rounded bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-sky-500"
+                  value={marks}
+                  onChange={(e) => setMarks(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="flex-1 w-full">
+                <input
+                  type="text"
+                  placeholder="Feedback (optional)..."
+                  className="w-full px-3 py-1.5 rounded bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-sky-500"
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                />
+              </div>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setEditing(false)}
+                  className="px-2.5 py-1.5 rounded text-xs text-slate-400 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 rounded bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold hover:opacity-90"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="flex items-center justify-between p-2 rounded bg-slate-950/40 border border-slate-800 w-full">
+              <div className="text-sm">
+                <span className="text-slate-500">Marks: </span>
+                <span className="font-bold text-sky-400">{marks}</span>
+                {feedback && (
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    <span className="text-slate-500">Feedback: </span>
+                    {feedback}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => setEditing(true)}
+                className="px-2.5 py-1 rounded border border-slate-850 text-slate-400 hover:text-white text-xs"
+              >
+                Edit Grade
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

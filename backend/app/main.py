@@ -6,13 +6,13 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import SQLModel, select
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 import os
 import shutil
 import uuid
 
 from .database import engine, get_session
-from .models import User, OtpCode, Course, Enrollment, ClassSession, Announcement, Note
+from .models import User, OtpCode, Course, Enrollment, ClassSession, Announcement, Note, DriveItem, Assignment, AssignmentSubmission
 from .schemas import (
     UserCreate,
     Token,
@@ -40,7 +40,7 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY", "teaching_app")
 ALGORITHM = "HS256"
 
-app = FastAPI(title="Teaching App Backend (Auth)")
+app = FastAPI(title="GyanSetu Backend")
 
 origins = [
     "http://localhost:5173",
@@ -711,6 +711,51 @@ def create_note(
     session.add(note)
     session.commit()
     session.refresh(note)
+
+    # Sync to Cloud Drive if file is attached
+    if file_url:
+        try:
+            # Ensure course folder exists
+            course_folder = session.exec(
+                select(DriveItem).where(DriveItem.course_id == course_id, DriveItem.is_folder == True)
+            ).first()
+            if not course_folder:
+                course = session.get(Course, course_id)
+                course_title = course.title if course else f"Course {course_id}"
+                course_folder = DriveItem(
+                    name=course_title,
+                    is_folder=True,
+                    course_id=course_id,
+                    uploader_id=current_user.id,
+                    parent_id=None
+                )
+                session.add(course_folder)
+                session.commit()
+                session.refresh(course_folder)
+            
+            # Determine physical file size
+            file_size = None
+            if file_url.startswith("/static/"):
+                local_path = STATIC_DIR / file_url.replace("/static/", "")
+                if local_path.exists():
+                    file_size = os.path.getsize(local_path)
+            
+            # Create a DriveItem inside this course folder
+            drive_file = DriveItem(
+                name=file.filename,
+                is_folder=False,
+                parent_id=course_folder.id,
+                uploader_id=current_user.id,
+                file_url=file_url,
+                file_type=file_type,
+                file_size=file_size
+            )
+            session.add(drive_file)
+            session.commit()
+        except Exception as sync_err:
+            # Don't fail note creation if drive sync fails
+            print(f"Error syncing note file to drive: {sync_err}")
+
     return note
 
 
@@ -910,3 +955,694 @@ def list_course_sessions(
         select(ClassSession).where(ClassSession.course_id == course_id)
     ).all()
     return sessions
+
+
+# ---- Cloud Drive Endpoints ----
+from pydantic import BaseModel
+
+class FolderCreateSchema(BaseModel):
+    name: str
+    parent_id: Optional[int] = None
+
+class MoveItemSchema(BaseModel):
+    item_id: int
+    new_parent_id: Optional[int] = None
+
+def has_folder_access(folder_id: int, user: User, session) -> bool:
+    """Check if the user has read/write permission to a folder"""
+    if user.role == "teacher":
+        return True
+    
+    # Query student enrolled course IDs
+    enrolled = session.exec(select(Enrollment).where(Enrollment.user_id == user.id)).all()
+    enrolled_course_ids = {e.course_id for e in enrolled}
+    
+    curr_id = folder_id
+    while curr_id is not None:
+        item = session.get(DriveItem, curr_id)
+        if not item:
+            return False
+        
+        # If it is associated with a course, verify enrollment
+        if item.course_id is not None:
+            return item.course_id in enrolled_course_ids
+            
+        # If it's a root-level custom folder, check ownership
+        if item.parent_id is None:
+            return item.uploader_id == user.id
+            
+        curr_id = item.parent_id
+        
+    return False
+
+@app.get("/api/drive/list")
+def list_drive_items(
+    parent_id: Optional[int] = None,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    List items inside a parent folder.
+    If parent_id is None (root), auto-generate folders for courses as a self-healing sync.
+    """
+    if parent_id is None:
+        try:
+            # Self-healing sync: Ensure a folder exists for every course
+            courses = session.exec(select(Course)).all()
+            existing_course_folders = session.exec(
+                select(DriveItem).where(DriveItem.is_folder == True, DriveItem.course_id != None)
+            ).all()
+            existing_course_ids = {cf.course_id for cf in existing_course_folders}
+            
+            for course in courses:
+                if course.id not in existing_course_ids:
+                    # Create default folder for course
+                    new_folder = DriveItem(
+                        name=course.title,
+                        is_folder=True,
+                        course_id=course.id,
+                        uploader_id=course.teacher_id,
+                        parent_id=None
+                    )
+                    session.add(new_folder)
+                    session.commit()
+        except Exception as e:
+            print(f"Error self-healing course folders: {e}")
+    else:
+        # Check permissions for non-root folders
+        if not has_folder_access(parent_id, current_user, session):
+            raise HTTPException(status_code=403, detail="Access denied to this folder")
+
+    # Query folder contents
+    if parent_id is None:
+        statement = select(DriveItem).where(DriveItem.parent_id == None).order_by(DriveItem.is_folder.desc(), DriveItem.name.asc())
+    else:
+        statement = select(DriveItem).where(DriveItem.parent_id == parent_id).order_by(DriveItem.is_folder.desc(), DriveItem.name.asc())
+        
+    items = session.exec(statement).all()
+    
+    # Filter items for student access at root level
+    if parent_id is None and current_user.role == "student":
+        enrolled = session.exec(select(Enrollment).where(Enrollment.user_id == current_user.id)).all()
+        enrolled_course_ids = {e.course_id for e in enrolled}
+        
+        filtered_items = []
+        for item in items:
+            # Show if course folder for enrolled course
+            if item.course_id is not None:
+                if item.course_id in enrolled_course_ids:
+                    filtered_items.append(item)
+            # Show if custom folder owned by the student
+            elif item.uploader_id == current_user.id:
+                filtered_items.append(item)
+        items = filtered_items
+
+    result = []
+    for item in items:
+        uploader = session.get(User, item.uploader_id)
+        uploader_name = uploader.full_name if uploader else "System"
+        result.append({
+            "id": item.id,
+            "name": item.name,
+            "is_folder": item.is_folder,
+            "parent_id": item.parent_id,
+            "course_id": item.course_id,
+            "uploader_id": item.uploader_id,
+            "uploader_name": uploader_name,
+            "file_url": item.file_url,
+            "file_type": item.file_type,
+            "file_size": item.file_size,
+            "created_at": item.created_at
+        })
+    return result
+
+@app.post("/api/drive/folders")
+def create_drive_folder(
+    data: FolderCreateSchema,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new custom folder"""
+    folder = DriveItem(
+        name=data.name.strip(),
+        is_folder=True,
+        parent_id=data.parent_id,
+        uploader_id=current_user.id
+    )
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    return folder
+
+@app.get("/api/drive/folders/all")
+def get_all_folders(
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Fetch all folders that the current user has access to, for move destination dropdown"""
+    folders = session.exec(select(DriveItem).where(DriveItem.is_folder == True)).all()
+    result = []
+    for f in folders:
+        # Exclude folders that cannot be accessed by the user
+        if has_folder_access(f.id, current_user, session):
+            result.append({
+                "id": f.id,
+                "name": f.name
+            })
+    return result
+
+@app.post("/api/drive/move")
+def move_drive_item(
+    data: MoveItemSchema,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Move a file or folder to a new destination folder"""
+    item = session.get(DriveItem, data.item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+        
+    # Check permissions on the item being moved (must be uploader or a teacher)
+    if item.uploader_id != current_user.id and current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Not authorized to move this item")
+        
+    # Prevent course folders from being moved (they should stay at root)
+    if item.course_id is not None:
+        raise HTTPException(status_code=400, detail="Cannot move course default folders")
+        
+    # Check destination folder permissions
+    if data.new_parent_id is not None:
+        dest = session.get(DriveItem, data.new_parent_id)
+        if not dest:
+            raise HTTPException(status_code=404, detail="Destination folder not found")
+        if not dest.is_folder:
+            raise HTTPException(status_code=400, detail="Destination must be a folder")
+        if not has_folder_access(data.new_parent_id, current_user, session):
+            raise HTTPException(status_code=403, detail="Access denied to destination folder")
+            
+        # Prevent cycles: moving a folder into itself or a subfolder of itself
+        curr_id = data.new_parent_id
+        while curr_id is not None:
+            if curr_id == data.item_id:
+                raise HTTPException(status_code=400, detail="Cannot move a folder into itself or its subfolders")
+            curr_parent = session.get(DriveItem, curr_id)
+            curr_id = curr_parent.parent_id if curr_parent else None
+            
+    # Perform move
+    item.parent_id = data.new_parent_id
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+@app.post("/api/drive/upload")
+def upload_file_to_drive(
+    file: UploadFile = File(...),
+    parent_id: Optional[int] = Form(None),
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Upload a file to a specific folder on the local drive"""
+    file_ext = os.path.splitext(file.filename)[1]
+    filename = f"{uuid.uuid4()}{file_ext}"
+    file_path = STATIC_DIR / filename
+    
+    # Save the file locally
+    contents = file.file.read()
+    file_size = len(contents)
+    
+    with open(file_path, "wb") as buffer:
+        buffer.write(contents)
+        
+    file_url = f"/static/{filename}"
+    
+    drive_item = DriveItem(
+        name=file.filename,
+        is_folder=False,
+        parent_id=parent_id,
+        uploader_id=current_user.id,
+        file_url=file_url,
+        file_type=file.content_type,
+        file_size=file_size
+    )
+    session.add(drive_item)
+    session.commit()
+    session.refresh(drive_item)
+    return drive_item
+
+@app.delete("/api/drive/items/{item_id}")
+def delete_drive_item(
+    item_id: int,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a drive file or folder recursively"""
+    item = session.get(DriveItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+        
+    # Check authorization: uploader or any teacher can delete
+    if item.uploader_id != current_user.id and current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Not authorized to delete this item")
+        
+    def recursive_delete(db_item):
+        if db_item.is_folder:
+            # Query child items
+            children = session.exec(select(DriveItem).where(DriveItem.parent_id == db_item.id)).all()
+            for child in children:
+                recursive_delete(child)
+        else:
+            # Delete local file if it exists
+            if db_item.file_url:
+                local_filename = db_item.file_url.replace("/static/", "")
+                local_path = STATIC_DIR / local_filename
+                if local_path.exists():
+                    try:
+                        os.remove(local_path)
+                    except Exception as e:
+                        print(f"Error removing physical file: {e}")
+        session.delete(db_item)
+        
+    recursive_delete(item)
+    session.commit()
+    return {"message": "Deleted successfully"}
+
+
+# ---- Assignments Endpoints ----
+
+from pydantic import BaseModel
+
+class GradeSubmissionSchema(BaseModel):
+    marks: float
+    feedback: Optional[str] = ""
+
+@app.post("/api/courses/{course_id}/assignments")
+def create_assignment(
+    course_id: int,
+    title: str = Form(...),
+    description: str = Form(""),
+    due_date: str = Form(...),
+    file: UploadFile = File(default=None),
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    course = session.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "Course not found")
+    if current_user.role != "teacher" or course.teacher_id != current_user.id:
+        raise HTTPException(403, "Only the course teacher can create assignments")
+    
+    # Parse due_date
+    try:
+        clean_due = due_date.replace("Z", "")
+        # Handles T or space separating date and time
+        if "T" in clean_due:
+            # Check length to handle possible seconds or offsets
+            parts = clean_due.split("T")
+            time_part = parts[1][:5] # limit to HH:MM if it has more details
+            clean_due = f"{parts[0]}T{time_part}"
+            parsed_due = datetime.strptime(clean_due, "%Y-%m-%dT%H:%M")
+        else:
+            parsed_due = datetime.fromisoformat(clean_due)
+    except Exception as e:
+        raise HTTPException(400, detail=f"Invalid due_date format: {str(e)}. Must be YYYY-MM-DDTHH:MM")
+
+    # Ensure course folder exists in Cloud Drive
+    course_folder = session.exec(
+        select(DriveItem).where(DriveItem.course_id == course_id, DriveItem.is_folder == True, DriveItem.parent_id == None)
+    ).first()
+    if not course_folder:
+        course_folder = DriveItem(
+            name=course.title,
+            is_folder=True,
+            course_id=course_id,
+            uploader_id=current_user.id,
+            parent_id=None
+        )
+        session.add(course_folder)
+        session.commit()
+        session.refresh(course_folder)
+
+    # Create subfolder for this assignment in the course folder
+    assignment_folder = DriveItem(
+        name=title.strip(),
+        is_folder=True,
+        parent_id=course_folder.id,
+        uploader_id=current_user.id,
+        course_id=course_id
+    )
+    session.add(assignment_folder)
+    session.commit()
+    session.refresh(assignment_folder)
+
+    file_url = None
+    file_name = None
+
+    if file:
+        file_ext = os.path.splitext(file.filename)[1]
+        filename = f"{uuid.uuid4()}{file_ext}"
+        file_path = STATIC_DIR / filename
+        
+        contents = file.file.read()
+        file_size = len(contents)
+        with open(file_path, "wb") as buffer:
+            buffer.write(contents)
+            
+        file_url = f"/static/{filename}"
+        file_name = file.filename
+
+        # Create DriveItem for teacher's assignment attachment
+        drive_file = DriveItem(
+            name=file_name,
+            is_folder=False,
+            parent_id=assignment_folder.id,
+            uploader_id=current_user.id,
+            file_url=file_url,
+            file_type=file.content_type,
+            file_size=file_size
+        )
+        session.add(drive_file)
+        session.commit()
+
+    assignment = Assignment(
+        course_id=course_id,
+        title=title.strip(),
+        description=description,
+        due_date=parsed_due,
+        folder_id=assignment_folder.id,
+        file_url=file_url,
+        file_name=file_name
+    )
+    session.add(assignment)
+    session.commit()
+    session.refresh(assignment)
+
+    return assignment
+
+@app.get("/api/courses/{course_id}/assignments")
+def list_assignments(
+    course_id: int,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    course = session.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "Course not found")
+        
+    # Check access: must be teacher or enrolled student
+    if current_user.role == "teacher":
+        if course.teacher_id != current_user.id:
+            raise HTTPException(403, "Not your course")
+    else:
+        # Check enrollment
+        enrolled = session.exec(
+            select(Enrollment).where(Enrollment.user_id == current_user.id, Enrollment.course_id == course_id)
+        ).first()
+        if not enrolled:
+            raise HTTPException(403, "Not enrolled in this course")
+
+    assignments = session.exec(
+        select(Assignment).where(Assignment.course_id == course_id).order_by(Assignment.created_at.desc())
+    ).all()
+
+    result = []
+    for asm in assignments:
+        asm_data = {
+            "id": asm.id,
+            "course_id": asm.course_id,
+            "title": asm.title,
+            "description": asm.description,
+            "due_date": asm.due_date.isoformat(),
+            "folder_id": asm.folder_id,
+            "file_url": asm.file_url,
+            "file_name": asm.file_name,
+            "created_at": asm.created_at.isoformat()
+        }
+        
+        # If student, attach their submission if it exists
+        if current_user.role == "student":
+            submission = session.exec(
+                select(AssignmentSubmission).where(
+                    AssignmentSubmission.assignment_id == asm.id,
+                    AssignmentSubmission.student_id == current_user.id
+                )
+            ).first()
+            if submission:
+                lateness = None
+                if submission.submitted_at > asm.due_date:
+                    diff = submission.submitted_at - asm.due_date
+                    days = diff.days
+                    hours = diff.seconds // 3600
+                    minutes = (diff.seconds % 3600) // 60
+                    parts = []
+                    if days > 0:
+                        parts.append(f"{days}d")
+                    if hours > 0:
+                        parts.append(f"{hours}h")
+                    if minutes > 0 or not parts:
+                        parts.append(f"{minutes}m")
+                    lateness = " ".join(parts) + " late"
+                
+                asm_data["submission"] = {
+                    "id": submission.id,
+                    "file_url": submission.file_url,
+                    "file_name": submission.file_name,
+                    "submitted_at": submission.submitted_at.isoformat(),
+                    "marks": submission.marks,
+                    "feedback": submission.feedback,
+                    "lateness": lateness
+                }
+            else:
+                asm_data["submission"] = None
+        result.append(asm_data)
+        
+    return result
+
+@app.post("/api/assignments/{assignment_id}/submit")
+def submit_assignment(
+    assignment_id: int,
+    file: UploadFile = File(...),
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    assignment = session.get(Assignment, assignment_id)
+    if not assignment:
+        raise HTTPException(404, "Assignment not found")
+        
+    course = session.get(Course, assignment.course_id)
+    if not course:
+        raise HTTPException(404, "Course not found")
+
+    # Enforce student role
+    if current_user.role != "student":
+        raise HTTPException(403, "Only students can submit assignments")
+
+    # Enforce enrollment
+    enrolled = session.exec(
+        select(Enrollment).where(
+            Enrollment.user_id == current_user.id,
+            Enrollment.course_id == course.id
+        )
+    ).first()
+    if not enrolled:
+        raise HTTPException(403, "Not enrolled in this course")
+
+    # Enforce PDF only!
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext != ".pdf" and file.content_type != "application/pdf":
+        raise HTTPException(400, "Only PDF files are allowed for submission")
+
+    # Check if a submission already exists to replace it
+    existing_sub = session.exec(
+        select(AssignmentSubmission).where(
+            AssignmentSubmission.assignment_id == assignment_id,
+            AssignmentSubmission.student_id == current_user.id
+        )
+    ).first()
+
+    # If exists, we can delete the old physical file and its DriveItem
+    if existing_sub:
+        if existing_sub.drive_item_id:
+            old_item = session.get(DriveItem, existing_sub.drive_item_id)
+            if old_item:
+                if old_item.file_url:
+                    old_filename = old_item.file_url.replace("/static/", "")
+                    old_path = STATIC_DIR / old_filename
+                    if old_path.exists():
+                        try:
+                            os.remove(old_path)
+                        except Exception as e:
+                            print(f"Error deleting old submission file: {e}")
+                session.delete(old_item)
+        session.delete(existing_sub)
+        session.commit()
+
+    # Save new file
+    filename = f"{uuid.uuid4()}.pdf"
+    file_path = STATIC_DIR / filename
+    contents = file.file.read()
+    file_size = len(contents)
+    with open(file_path, "wb") as buffer:
+        buffer.write(contents)
+        
+    file_url = f"/static/{filename}"
+    display_name = f"{current_user.full_name or current_user.email} - Submission.pdf"
+
+    # Save as DriveItem inside the assignment's folder
+    drive_file = DriveItem(
+        name=display_name,
+        is_folder=False,
+        parent_id=assignment.folder_id,
+        uploader_id=current_user.id,
+        file_url=file_url,
+        file_type="application/pdf",
+        file_size=file_size
+    )
+    session.add(drive_file)
+    session.commit()
+    session.refresh(drive_file)
+
+    # Save submission
+    submission = AssignmentSubmission(
+        assignment_id=assignment_id,
+        student_id=current_user.id,
+        file_url=file_url,
+        file_name=file.filename,
+        submitted_at=datetime.utcnow(),
+        drive_item_id=drive_file.id
+    )
+    session.add(submission)
+    session.commit()
+    session.refresh(submission)
+
+    # Return submission details with computed lateness
+    lateness = None
+    if submission.submitted_at > assignment.due_date:
+        diff = submission.submitted_at - assignment.due_date
+        days = diff.days
+        hours = diff.seconds // 3600
+        minutes = (diff.seconds % 3600) // 60
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0 or not parts:
+            parts.append(f"{minutes}m")
+        lateness = " ".join(parts) + " late"
+
+    return {
+        "id": submission.id,
+        "file_url": submission.file_url,
+        "file_name": submission.file_name,
+        "submitted_at": submission.submitted_at.isoformat(),
+        "marks": submission.marks,
+        "feedback": submission.feedback,
+        "lateness": lateness
+    }
+
+@app.get("/api/assignments/{assignment_id}/submissions")
+def list_submissions(
+    assignment_id: int,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    assignment = session.get(Assignment, assignment_id)
+    if not assignment:
+        raise HTTPException(404, "Assignment not found")
+        
+    course = session.get(Course, assignment.course_id)
+    if not course:
+        raise HTTPException(404, "Course not found")
+        
+    # Check teacher access
+    if current_user.role != "teacher" or course.teacher_id != current_user.id:
+        raise HTTPException(403, "Only the course teacher can view submissions")
+
+    submissions = session.exec(
+        select(AssignmentSubmission).where(AssignmentSubmission.assignment_id == assignment_id)
+    ).all()
+
+    # Also list all enrolled students to show who has NOT submitted
+    enrollments = session.exec(
+        select(Enrollment).where(Enrollment.course_id == course.id)
+    ).all()
+
+    student_map = {}
+    for enr in enrollments:
+        student = session.get(User, enr.user_id)
+        if student:
+            student_map[student.id] = student
+
+    submissions_map = {sub.student_id: sub for sub in submissions}
+
+    result = []
+    # Loop over all enrolled students so the teacher sees a full dashboard
+    for student_id, student in student_map.items():
+        sub = submissions_map.get(student_id)
+        sub_data = None
+        if sub:
+            lateness = None
+            if sub.submitted_at > assignment.due_date:
+                diff = sub.submitted_at - assignment.due_date
+                days = diff.days
+                hours = diff.seconds // 3600
+                minutes = (diff.seconds % 3600) // 60
+                parts = []
+                if days > 0:
+                    parts.append(f"{days}d")
+                if hours > 0:
+                    parts.append(f"{hours}h")
+                if minutes > 0 or not parts:
+                    parts.append(f"{minutes}m")
+                lateness = " ".join(parts) + " late"
+                
+            sub_data = {
+                "id": sub.id,
+                "file_url": sub.file_url,
+                "file_name": sub.file_name,
+                "submitted_at": sub.submitted_at.isoformat(),
+                "marks": sub.marks,
+                "feedback": sub.feedback,
+                "lateness": lateness
+            }
+            
+        result.append({
+            "student_id": student.id,
+            "student_name": student.full_name or student.email,
+            "student_email": student.email,
+            "submission": sub_data
+        })
+        
+    return result
+
+@app.post("/api/submissions/{submission_id}/grade")
+def grade_submission(
+    submission_id: int,
+    data: GradeSubmissionSchema,
+    session=Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    submission = session.get(AssignmentSubmission, submission_id)
+    if not submission:
+        raise HTTPException(404, "Submission not found")
+        
+    assignment = session.get(Assignment, submission.assignment_id)
+    if not assignment:
+        raise HTTPException(404, "Assignment not found")
+        
+    course = session.get(Course, assignment.course_id)
+    if not course:
+        raise HTTPException(404, "Course not found")
+        
+    if current_user.role != "teacher" or course.teacher_id != current_user.id:
+        raise HTTPException(403, "Only the course teacher can grade submissions")
+
+    submission.marks = data.marks
+    submission.feedback = data.feedback
+    session.add(submission)
+    session.commit()
+    session.refresh(submission)
+    return submission
+
+

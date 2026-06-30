@@ -5,6 +5,7 @@ import { api } from "../../services/api";
 import Sidebar from "./components/Sidebar";
 import CoursesGrid from "./components/CoursesGrid";
 import CreateCourseModal from "./components/CreateCourseModal";
+import CloudDrive from "../../components/CloudDrive";
 
 export default function TeacherDashboard() {
   const { user, token } = useContext(AuthContext);
@@ -12,6 +13,7 @@ export default function TeacherDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  const [activeTab, setActiveTab] = useState("courses");
 
   // Fetch courses from API on component mount
   // This is the key pattern: useEffect + API call
@@ -85,7 +87,7 @@ export default function TeacherDashboard() {
 
   return (
     <div className="flex min-h-screen bg-slate-950">
-      <Sidebar onCreateCourse={() => setShowModal(true)} />
+      <Sidebar onCreateCourse={() => setShowModal(true)} activeTab={activeTab} onTabChange={setActiveTab} />
 
       <main className="flex-1 overflow-auto">
         {/* Header Section */}
@@ -123,66 +125,82 @@ export default function TeacherDashboard() {
           </div>
         </div>
 
-        {/* Stats Cards - Now showing real data! */}
-        <div className="px-8 py-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            {stats.map((stat, i) => (
-              <div
-                key={i}
-                className={`relative overflow-hidden rounded-2xl bg-gradient-to-br ${stat.color} border border-slate-800/50 p-5`}
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">
-                      {stat.label}
-                    </p>
-                    <p className="text-3xl font-bold text-white mt-2">{stat.value}</p>
-                    <p className="text-xs text-slate-400 mt-2">{stat.trend}</p>
+        {/* Dynamic Tab Switcher */}
+        {activeTab === "courses" && (
+          <div className="px-8 py-6">
+            {/* Stats Cards - Now showing real data! */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              {stats.map((stat, i) => (
+                <div
+                  key={i}
+                  className={`relative overflow-hidden rounded-2xl bg-gradient-to-br ${stat.color} border border-slate-800/50 p-5`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">
+                        {stat.label}
+                      </p>
+                      <p className="text-3xl font-bold text-white mt-2">{stat.value}</p>
+                      <p className="text-xs text-slate-400 mt-2">{stat.trend}</p>
+                    </div>
+                    <div className="text-3xl opacity-80">{stat.icon}</div>
                   </div>
-                  <div className="text-3xl opacity-80">{stat.icon}</div>
                 </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Courses Section */}
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <span>📚</span>
-              My Courses
-            </h2>
-            <button
-              onClick={() => setShowModal(true)}
-              className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-medium hover:opacity-90 transition-opacity"
-            >
-              + New Course
-            </button>
-          </div>
-
-          {/* Loading State */}
-          {loading && (
-            <div className="flex items-center justify-center py-20">
-              <div className="w-10 h-10 border-3 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
+              ))}
             </div>
-          )}
 
-          {/* Error State */}
-          {error && (
-            <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-6 text-center">
-              <p className="text-red-400">{error}</p>
+            {/* Courses Section */}
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                <span>📚</span>
+                My Courses
+              </h2>
               <button
-                onClick={() => window.location.reload()}
-                className="mt-4 px-4 py-2 rounded-lg bg-red-500/20 text-red-300 text-sm hover:bg-red-500/30 transition-colors"
+                onClick={() => setShowModal(true)}
+                className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-medium hover:opacity-90 transition-opacity"
               >
-                Try Again
+                + New Course
               </button>
             </div>
-          )}
 
+            {/* Loading State */}
+            {loading && (
+              <div className="flex items-center justify-center py-20">
+                <div className="w-10 h-10 border-3 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
+              </div>
+            )}
 
-          {/* Courses Grid */}
-          {!loading && !error && <CoursesGrid courses={courses} />}
-        </div>
+            {/* Error State */}
+            {error && (
+              <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-6 text-center">
+                <p className="text-red-400">{error}</p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="mt-4 px-4 py-2 rounded-lg bg-red-500/20 text-red-300 text-sm hover:bg-red-500/30 transition-colors"
+                >
+                  Try Again
+                </button>
+              </div>
+            )}
+
+            {/* Courses Grid */}
+            {!loading && !error && <CoursesGrid courses={courses} />}
+          </div>
+        )}
+
+        {activeTab === "drive" && (
+          <div className="px-8 py-6">
+            <CloudDrive />
+          </div>
+        )}
+
+        {activeTab !== "courses" && activeTab !== "drive" && (
+          <div className="px-8 py-16 text-center text-slate-400 bg-slate-900/10 border border-dashed border-slate-800/40 rounded-2xl mx-8 mt-6">
+            <span className="text-5xl mb-4 block">🚧</span>
+            <h3 className="text-lg font-semibold text-white capitalize">{activeTab} Section</h3>
+            <p className="text-xs text-slate-500 mt-1">This section is currently under construction.</p>
+          </div>
+        )}
       </main>
 
       {showModal && (

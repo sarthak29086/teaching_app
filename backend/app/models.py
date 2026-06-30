@@ -75,3 +75,42 @@ class ClassSession(SQLModel, table=True):
     room_name: Optional[str] = None
     participants: str = Field(default="[]")  # JSON string of user IDs
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DriveItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    is_folder: bool = Field(default=False)
+    parent_id: Optional[int] = Field(default=None, foreign_key="driveitem.id")
+    course_id: Optional[int] = Field(default=None, foreign_key="course.id")
+    uploader_id: int = Field(foreign_key="user.id")
+    file_url: Optional[str] = None
+    file_type: Optional[str] = None
+    file_size: Optional[int] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Assignment(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    course_id: int = Field(foreign_key="course.id")
+    title: str
+    description: str = ""
+    due_date: datetime
+    folder_id: Optional[int] = Field(default=None, foreign_key="driveitem.id")
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AssignmentSubmission(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    assignment_id: int = Field(foreign_key="assignment.id")
+    student_id: int = Field(foreign_key="user.id")
+    file_url: str
+    file_name: str
+    submitted_at: datetime = Field(default_factory=datetime.utcnow)
+    marks: Optional[float] = None
+    feedback: Optional[str] = None
+    drive_item_id: Optional[int] = Field(default=None, foreign_key="driveitem.id")
+
+

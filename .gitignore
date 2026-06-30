@@ -3,7 +3,7 @@
 .vscode/
 
 # Python / Backend
-backend/__pycache__/
+**/__pycache__/
 backend/*.py[cod]
 backend/venv/
 backend/.venv/
@@ -25,3 +25,9 @@ frontend/yarn-error.log*
 # LiveKit / Sensitive
 *.pem
 *.key
+
+# User Uploads
+backend/static/*
+!backend/static/.gitkeep
+dummy.pdf
+

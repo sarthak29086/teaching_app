@@ -6,8 +6,12 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/teaching_app")
 
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
 # echo=True will print SQL in console (helpful during dev)
-engine = create_engine(DATABASE_URL, echo=False, connect_args={})
+engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 def get_session():
     with Session(engine) as session:
         yield session

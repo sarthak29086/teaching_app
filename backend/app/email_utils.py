@@ -24,10 +24,10 @@ def send_otp_email(to_email: str, code: str):
         print(f"[EMAIL-DEV] Would send OTP {code} to {to_email}, but SMTP not configured.")
         return
 
-    subject = "Your Teaching App OTP"
+    subject = "Your GyanSetu OTP"
     body = f"""Hi,
 
-Here is your one-time code for Teaching App:
+Here is your one-time code for GyanSetu:
 
     {code}
 
@@ -35,12 +35,12 @@ This code will expire in about 10 minutes.
 
 If you did not request this, you can ignore this email.
 
-– Teaching App
+– GyanSetu
 """
 
     msg = MIMEText(body)
     msg["Subject"] = subject
-    msg["From"] = formataddr(("Teaching App", SMTP_FROM))
+    msg["From"] = formataddr(("GyanSetu", SMTP_FROM))
     msg["To"] = to_email
 
     try:

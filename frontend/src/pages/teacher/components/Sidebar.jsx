@@ -1,10 +1,11 @@
 // src/pages/teacher/components/Sidebar.jsx
 import { useState } from "react";
 
-export default function Sidebar({ onCreateCourse, activeTab = "courses" }) {
+export default function Sidebar({ onCreateCourse, activeTab = "courses", onTabChange }) {
   const navItems = [
     { id: "courses", label: "My Courses", icon: "📚" },
     { id: "live", label: "Live Classes", icon: "🎥" },
+    { id: "drive", label: "Cloud Drive", icon: "📁" },
     { id: "students", label: "Students", icon: "👥" },
     { id: "analytics", label: "Analytics", icon: "📊" },
     { id: "settings", label: "Settings", icon: "⚙️" },
@@ -49,6 +50,7 @@ export default function Sidebar({ onCreateCourse, activeTab = "courses" }) {
           {navItems.map((item) => (
             <button
               key={item.id}
+              onClick={() => onTabChange && onTabChange(item.id)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${activeTab === item.id
                   ? "bg-gradient-to-r from-sky-500/10 to-indigo-500/10 text-white border border-sky-500/20"
                   : "text-slate-400 hover:text-white hover:bg-slate-800/50"

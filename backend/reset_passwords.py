@@ -5,7 +5,7 @@ from app.models import User
 from app.auth import hash_password
 
 load_dotenv()
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5433/teaching_app"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/teaching_app")
 engine = create_engine(DATABASE_URL)
 
 def reset_all_passwords():

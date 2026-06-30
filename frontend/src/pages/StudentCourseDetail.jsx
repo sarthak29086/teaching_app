@@ -17,6 +17,7 @@ export default function StudentCourseDetail() {
     const [sessions, setSessions] = useState([]);
     const [announcements, setAnnouncements] = useState([]);
     const [notes, setNotes] = useState([]);
+    const [assignments, setAssignments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
@@ -33,16 +34,18 @@ export default function StudentCourseDetail() {
                 if (foundCourse) {
                     setCourse(foundCourse);
 
-                    // Fetch sessions, announcements and notes from API
-                    const [sessionsData, announcementsData, notesData] = await Promise.all([
+                    // Fetch sessions, announcements, notes and assignments from API
+                    const [sessionsData, announcementsData, notesData, assignmentsData] = await Promise.all([
                         api.get(`/api/courses/${courseId}/sessions`, { token }),
                         api.get(`/api/courses/${courseId}/announcements`, { token }),
-                        api.get(`/api/courses/${courseId}/notes`, { token })
+                        api.get(`/api/courses/${courseId}/notes`, { token }),
+                        api.get(`/api/courses/${courseId}/assignments`, { token })
                     ]);
 
                     setSessions(sessionsData || []);
                     setAnnouncements(announcementsData || []);
                     setNotes(notesData || []);
+                    setAssignments(assignmentsData || []);
                 } else {
                     setError("Course not found or not enrolled");
                 }
@@ -55,6 +58,15 @@ export default function StudentCourseDetail() {
 
         if (token) fetchData();
     }, [courseId, token]);
+
+    const refreshAssignments = async () => {
+        try {
+            const data = await api.get(`/api/courses/${courseId}/assignments`, { token });
+            setAssignments(data || []);
+        } catch (err) {
+            console.error("Failed to refresh assignments", err);
+        }
+    };
 
 
     const navigate = useNavigate();
@@ -81,7 +93,7 @@ export default function StudentCourseDetail() {
         { id: "sessions", label: "Live Sessions", icon: "🎥", count: sessions.length },
         { id: "announcements", label: "Announcements", icon: "📢", count: announcements.length },
         { id: "notes", label: "Notes & Materials", icon: "📝", count: notes.length },
-        { id: "assignments", label: "Assignments", icon: "📋", count: 0 },
+        { id: "assignments", label: "Assignments", icon: "📋", count: assignments.length },
     ];
 
     if (loading) {
@@ -270,13 +282,197 @@ export default function StudentCourseDetail() {
                     {activeTab === "assignments" && (
                         <div className="space-y-6">
                             <h2 className="text-lg font-semibold text-white">Assignments</h2>
-                            <div className="text-center py-16 border border-dashed border-slate-800 rounded-xl">
-                                <span className="text-4xl mb-4 block">📋</span>
-                                <p className="text-slate-400 mb-2">No assignments due</p>
-                            </div>
+                            {assignments.length === 0 ? (
+                                <div className="text-center py-16 border border-dashed border-slate-800 rounded-xl">
+                                    <span className="text-4xl mb-4 block">📋</span>
+                                    <p className="text-slate-400 mb-2">No assignments posted for this course.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    {assignments.map((asm) => (
+                                        <StudentAssignmentRow
+                                            key={asm.id}
+                                            assignment={asm}
+                                            token={token}
+                                            onRefresh={refreshAssignments}
+                                        />
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
+            </div>
+        </div>
+    );
+}
+
+function StudentAssignmentRow({ assignment, token, onRefresh }) {
+    const [file, setFile] = useState(null);
+    const [submitting, setSubmitting] = useState(false);
+    const [showForm, setShowForm] = useState(!assignment.submission);
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!file) return;
+
+        // Enforce PDF only
+        if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+            alert("Only PDF files are allowed for submission.");
+            return;
+        }
+
+        setSubmitting(true);
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+
+            await api.post(`/api/assignments/${assignment.id}/submit`, formData, { token });
+            alert("Assignment submitted successfully!");
+            setFile(null);
+            setShowForm(false);
+            onRefresh();
+        } catch (err) {
+            alert(err.detail || "Failed to submit assignment");
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const isOverdue = new Date(assignment.due_date) < new Date();
+    const sub = assignment.submission;
+
+    return (
+        <div className="rounded-xl border border-slate-800 bg-slate-800/30 p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                    <h3 className="font-semibold text-white text-base">{assignment.title}</h3>
+                    {assignment.description && (
+                        <p className="text-sm text-slate-400 mt-1">{assignment.description}</p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3 mt-3">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${isOverdue && !sub ? "bg-red-500/10 text-red-400" : "bg-sky-500/10 text-sky-400"}`}>
+                            Due: {new Date(assignment.due_date).toLocaleString()}
+                        </span>
+                        {assignment.file_url && (
+                            <a
+                                href={`${API_BASE}${assignment.file_url}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-slate-800 text-xs text-sky-400 hover:bg-slate-700/50"
+                            >
+                                📎 Download Instructions ({assignment.file_name})
+                            </a>
+                        )}
+                    </div>
+                </div>
+
+                <div>
+                    {sub ? (
+                        <div className="flex flex-col items-end gap-1">
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs font-semibold">
+                                ✓ Submitted
+                            </span>
+                            {sub.lateness ? (
+                                <span className="text-[10px] text-red-400 font-semibold mt-1">
+                                    ({sub.lateness})
+                                </span>
+                            ) : (
+                                <span className="text-[10px] text-emerald-400 font-semibold mt-1">
+                                    (On time)
+                                </span>
+                            )}
+                        </div>
+                    ) : isOverdue ? (
+                        <span className="px-2 py-0.5 rounded bg-red-500/10 text-red-400 text-xs font-semibold">
+                            ⚠️ Missing / Overdue
+                        </span>
+                    ) : (
+                        <span className="px-2 py-0.5 rounded bg-yellow-500/10 text-yellow-400 text-xs font-semibold">
+                            Pending
+                        </span>
+                    )}
+                </div>
+            </div>
+
+            {/* Submission Status & Details or Form */}
+            <div className="pt-2 border-t border-slate-800/50">
+                {sub && !showForm ? (
+                    <div className="space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-lg bg-slate-950/40 border border-slate-800">
+                          <div className="text-sm">
+                            <span className="text-slate-400">Your file: </span>
+                            <a
+                              href={`${API_BASE}${sub.file_url}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sky-400 hover:underline font-medium"
+                            >
+                              {sub.file_name}
+                            </a>
+                          </div>
+                          <button
+                            onClick={() => setShowForm(true)}
+                            className="px-3 py-1 rounded border border-slate-800 text-xs text-slate-400 hover:text-white"
+                          >
+                            Resubmit PDF
+                          </button>
+                        </div>
+
+                        {/* Grades Section */}
+                        <div className="p-3 rounded-lg bg-slate-900/40 border border-slate-800">
+                            <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Grade & Feedback</h4>
+                            {sub.marks !== null ? (
+                                <div>
+                                    <div className="text-sm text-white">
+                                        Marks: <span className="font-bold text-sky-400 text-base">{sub.marks}</span>
+                                    </div>
+                                    {sub.feedback && (
+                                        <p className="text-xs text-slate-400 mt-1">
+                                            <span className="text-slate-500">Instructor feedback:</span> {sub.feedback}
+                                        </p>
+                                    )}
+                                </div>
+                            ) : (
+                                <p className="text-xs text-slate-500 italic">Pending grading by teacher</p>
+                            )}
+                        </div>
+                    </div>
+                ) : (
+                    <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3 items-end sm:items-center">
+                        <div className="flex-1 w-full">
+                            <label className="block text-xs font-medium text-slate-400 mb-1">
+                                Upload Submission (PDF only)
+                              </label>
+                              <input
+                                type="file"
+                                accept=".pdf"
+                                onChange={(e) => setFile(e.target.files[0])}
+                                className="w-full text-sm text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-sky-500/10 file:text-sky-400 hover:file:bg-sky-500/20"
+                                disabled={submitting}
+                                required
+                              />
+                        </div>
+                        <div className="flex gap-2 w-full sm:w-auto">
+                            {sub && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowForm(false)}
+                                    className="flex-1 sm:flex-initial px-4 py-2 rounded-lg border border-slate-800 text-xs text-slate-400 hover:text-white"
+                                >
+                                    Cancel
+                                </button>
+                            )}
+                            <button
+                                type="submit"
+                                disabled={!file || submitting}
+                                className="flex-1 sm:flex-initial px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
+                            >
+                                {submitting ? "Uploading..." : sub ? "Resubmit" : "Submit"}
+                            </button>
+                        </div>
+                    </form>
+                )}
             </div>
         </div>
     );
